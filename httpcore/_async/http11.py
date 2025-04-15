@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import enum
 import logging
 import ssl
@@ -84,8 +85,6 @@ class AsyncHTTP11Connection(AsyncConnectionInterface):
                     "send_request_headers", logger, request, kwargs
                 ) as trace:
                     await self._send_request_headers(**kwargs)
-                async with Trace("send_request_body", logger, request, kwargs) as trace:
-                    await self._send_request_body(**kwargs)
             except WriteError:
                 # If we get a write error while we're writing the request,
                 # then we supress this error and move on to attempting to
@@ -94,22 +93,25 @@ class AsyncHTTP11Connection(AsyncConnectionInterface):
                 # error response.
                 pass
 
-            async with Trace(
-                "receive_response_headers", logger, request, kwargs
-            ) as trace:
-                (
-                    http_version,
-                    status,
-                    reason_phrase,
-                    headers,
-                    trailing_data,
-                ) = await self._receive_response_headers(**kwargs)
-                trace.return_value = (
-                    http_version,
-                    status,
-                    reason_phrase,
-                    headers,
-                )
+            request_body_task = asyncio.create_task(
+                self._send_request_body_with_trace(request, kwargs)
+            )
+            receive_header_task = asyncio.create_task(
+                self._receive_response_headers_with_trace(request, kwargs)
+            )
+
+            # If the server doesn't respond eagerly, wait.
+            await asyncio.wait(
+                (receive_header_task, request_body_task),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            (
+                http_version,
+                status,
+                reason_phrase,
+                headers,
+                trailing_data,
+            ) = await receive_header_task
 
             network_stream = self._network_stream
 
@@ -122,7 +124,9 @@ class AsyncHTTP11Connection(AsyncConnectionInterface):
             return Response(
                 status=status,
                 headers=headers,
-                content=HTTP11ConnectionByteStream(self, request),
+                content=HTTP11ConnectionEagerByteStream(
+                    self, request, request_body_task
+                ),
                 extensions={
                     "http_version": http_version,
                     "reason_phrase": reason_phrase,
@@ -160,6 +164,13 @@ class AsyncHTTP11Connection(AsyncConnectionInterface):
 
         await self._send_event(h11.EndOfMessage(), timeout=timeout)
 
+    async def _send_request_body_with_trace(self, request, kwargs):
+        try:
+            async with Trace("send_request_body", logger, request, kwargs) as trace:
+                await self._send_request_body(**kwargs)
+        except WriteError:
+            pass
+
     async def _send_event(self, event: h11.Event, timeout: float | None = None) -> None:
         bytes_to_send = self._h11_state.send(event)
         if bytes_to_send is not None:
@@ -192,6 +203,24 @@ class AsyncHTTP11Connection(AsyncConnectionInterface):
         trailing_data, _ = self._h11_state.trailing_data
 
         return http_version, event.status_code, event.reason, headers, trailing_data
+
+    async def _receive_response_headers_with_trace(self, request, kwargs):
+        async with Trace("receive_response_headers", logger, request, kwargs) as trace:
+            ret = await self._receive_response_headers(**kwargs)
+            (
+                http_version,
+                status,
+                reason_phrase,
+                headers,
+                _,
+            ) = ret
+            trace.return_value = (
+                http_version,
+                status,
+                reason_phrase,
+                headers,
+            )
+            return ret
 
     async def _receive_response_body(
         self, request: Request
@@ -346,6 +375,32 @@ class HTTP11ConnectionByteStream:
             self._closed = True
             async with Trace("response_closed", logger, self._request):
                 await self._connection._response_closed()
+
+
+class HTTP11ConnectionEagerByteStream(HTTP11ConnectionByteStream):
+    def __init__(
+        self,
+        connection: AsyncHTTP11Connection,
+        request: Request,
+        request_body_task: asyncio.Task,
+    ) -> None:
+        super().__init__(connection, request)
+        self._request_body_task = request_body_task
+
+    async def __aiter__(self) -> typing.AsyncIterator[bytes]:
+        try:
+            aiterator = super().__aiter__()
+            while True:
+                task = asyncio.create_task(anext(aiterator))
+                await asyncio.wait(
+                    (self._request_body_task, task),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                yield await task
+        except StopAsyncIteration:
+            pass
+        finally:
+            self._request_body_task.cancel()
 
 
 class AsyncHTTP11UpgradeStream(AsyncNetworkStream):

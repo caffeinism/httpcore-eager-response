@@ -3,13 +3,14 @@ requires = ["hatchling", "hatch-fancy-pypi-readme"]
 build-backend = "hatchling.build"
 
 [project]
-name = "httpcore"
+name = "httpcore-eager-response"
 dynamic = ["readme", "version"]
 description = "A minimal low-level HTTP client."
 license = "BSD-3-Clause"
 requires-python = ">=3.8"
 authors = [
     { name = "Tom Christie", email = "tom@tomchristie.com" },
+    { name = "Kim Minjong", email = "make.dirty.code@gmail.com" },
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -62,6 +63,9 @@ include = [
     "/README.md",
     "/tests"
 ]
+
+[tool.hatch.build.targets.wheel]
+packages = ["httpcore"]
 
 [tool.hatch.metadata.hooks.fancy-pypi-readme]
 content-type = "text/markdown"
