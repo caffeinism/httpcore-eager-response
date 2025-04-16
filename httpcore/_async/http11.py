@@ -389,16 +389,8 @@ class HTTP11ConnectionEagerByteStream(HTTP11ConnectionByteStream):
 
     async def __aiter__(self) -> typing.AsyncIterator[bytes]:
         try:
-            aiterator = super().__aiter__()
-            while True:
-                task = asyncio.create_task(anext(aiterator))
-                await asyncio.wait(
-                    (self._request_body_task, task),
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                yield await task
-        except StopAsyncIteration:
-            pass
+            async for it in super().__aiter__():
+                yield it
         finally:
             self._request_body_task.cancel()
 
