@@ -42,8 +42,8 @@ class HTTPConnectionState(enum.IntEnum):
 
 
 class AsyncHTTP11Connection(AsyncConnectionInterface):
-    READ_NUM_BYTES = 64 * 1024
-    MAX_INCOMPLETE_EVENT_SIZE = 100 * 1024
+    READ_NUM_BYTES = 4 * 1024 * 1024
+    MAX_INCOMPLETE_EVENT_SIZE = 5 * 1024 * 1024
 
     def __init__(
         self,
@@ -231,7 +231,7 @@ class AsyncHTTP11Connection(AsyncConnectionInterface):
         while True:
             event = await self._receive_event(timeout=timeout)
             if isinstance(event, h11.Data):
-                yield bytes(event.data)
+                yield event.data
             elif isinstance(event, (h11.EndOfMessage, h11.PAUSED)):
                 break
 
