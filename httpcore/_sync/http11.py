@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent import futures
 import enum
 import logging
 import ssl
@@ -84,8 +85,6 @@ class HTTP11Connection(ConnectionInterface):
                     "send_request_headers", logger, request, kwargs
                 ) as trace:
                     self._send_request_headers(**kwargs)
-                with Trace("send_request_body", logger, request, kwargs) as trace:
-                    self._send_request_body(**kwargs)
             except WriteError:
                 # If we get a write error while we're writing the request,
                 # then we supress this error and move on to attempting to
@@ -94,6 +93,8 @@ class HTTP11Connection(ConnectionInterface):
                 # error response.
                 pass
 
+            p = futures.ThreadPoolExecutor(1)
+            request_body_task = p.submit(self._send_request_body_with_trace, request, kwargs)
             with Trace(
                 "receive_response_headers", logger, request, kwargs
             ) as trace:
@@ -110,6 +111,9 @@ class HTTP11Connection(ConnectionInterface):
                     reason_phrase,
                     headers,
                 )
+            if request_body_task.done():
+                request_body_task.exception()
+                p.shutdown()
 
             network_stream = self._network_stream
 
@@ -122,7 +126,7 @@ class HTTP11Connection(ConnectionInterface):
             return Response(
                 status=status,
                 headers=headers,
-                content=HTTP11ConnectionByteStream(self, request),
+                content=HTTP11ConnectionEagerByteStream(self, request, p, request_body_task),
                 extensions={
                     "http_version": http_version,
                     "reason_phrase": reason_phrase,
@@ -159,6 +163,14 @@ class HTTP11Connection(ConnectionInterface):
             self._send_event(event, timeout=timeout)
 
         self._send_event(h11.EndOfMessage(), timeout=timeout)
+
+
+    def _send_request_body_with_trace(self, request: Request, kwargs) -> None:
+        try:
+            with Trace("send_request_body", logger, request, kwargs) as trace:
+                self._send_request_body(**kwargs)
+        except WriteError:
+            pass
 
     def _send_event(self, event: h11.Event, timeout: float | None = None) -> None:
         bytes_to_send = self._h11_state.send(event)
@@ -347,6 +359,25 @@ class HTTP11ConnectionByteStream:
             with Trace("response_closed", logger, self._request):
                 self._connection._response_closed()
 
+
+class HTTP11ConnectionEagerByteStream(HTTP11ConnectionByteStream):
+    def __init__(
+        self,
+        connection: HTTP11Connection,
+        request: Request,
+        pool: futures.ThreadPoolExecutor,
+        request_body_task: futures.Future,
+    ) -> None:
+        super().__init__(connection, request)
+        self._pool = pool
+        self._request_body_task = request_body_task
+
+    def __iter__(self) -> typing.Iterator[bytes]:
+        try:
+            yield from super().__iter__()
+        finally:
+            self._request_body_task.result()
+            self._pool.shutdown()
 
 class HTTP11UpgradeStream(NetworkStream):
     def __init__(self, stream: NetworkStream, leading_data: bytes) -> None:
